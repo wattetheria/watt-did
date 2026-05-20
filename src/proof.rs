@@ -79,8 +79,66 @@ pub struct AgentNodeBindingProof {
     pub proof: ProofEnvelope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentAccountCustody {
+    WatchOnly,
+    LocalGenerated,
+    ImportedKey,
+    ExternalSigner,
+    Custom(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentAccountBindingProof {
+    pub agent_did: Did,
+    pub payment_address: String,
+    pub rail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    pub custody: PaymentAccountCustody,
+    pub receive_only: bool,
+    pub can_sign: bool,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub issued_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    pub agent_proof: ProofEnvelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_account_proof: Option<ProofEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedAgentContext {
+    pub agent_did: Did,
+    pub controller_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_node_id: Option<String>,
+    pub envelope_verified: bool,
+    pub source_node_verified: bool,
+    pub controller_binding_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_binding_proof: Option<AgentNodeBindingProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_account_binding: Option<PaymentAccountBindingProof>,
+    pub verified_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
 pub trait AgentNodeBindingVerifier {
     fn verify_agent_node_binding(&self, proof: &AgentNodeBindingProof) -> Result<()>;
+}
+
+pub trait PaymentAccountBindingVerifier {
+    fn verify_payment_account_binding(&self, proof: &PaymentAccountBindingProof) -> Result<()>;
+}
+
+pub trait VerifiedAgentContextVerifier {
+    fn verify_verified_agent_context(&self, context: &VerifiedAgentContext) -> Result<()>;
 }
 
 pub trait ProofVerifier {
@@ -130,6 +188,13 @@ pub struct ResolverBackedUcanVerifier<R, V> {
     proof_verifier: V,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentPaymentContextVerifier<C, P> {
+    controller_binding_verifier: C,
+    payment_account_binding_verifier: P,
+    require_payment_account_binding: bool,
+}
+
 impl<R, V> ResolverBackedBindingVerifier<R, V> {
     pub fn new(resolver: R, proof_verifier: V) -> Self {
         Self {
@@ -144,6 +209,27 @@ impl<R, V> ResolverBackedUcanVerifier<R, V> {
         Self {
             resolver,
             proof_verifier,
+        }
+    }
+}
+
+impl<C, P> AgentPaymentContextVerifier<C, P> {
+    pub fn new(controller_binding_verifier: C, payment_account_binding_verifier: P) -> Self {
+        Self {
+            controller_binding_verifier,
+            payment_account_binding_verifier,
+            require_payment_account_binding: true,
+        }
+    }
+
+    pub fn with_optional_payment_binding(
+        controller_binding_verifier: C,
+        payment_account_binding_verifier: P,
+    ) -> Self {
+        Self {
+            controller_binding_verifier,
+            payment_account_binding_verifier,
+            require_payment_account_binding: false,
         }
     }
 }
@@ -169,14 +255,158 @@ impl AgentNodeBindingProof {
             ));
         }
 
-        if let Some(expires_at_ms) = self.expires_at_ms {
-            if expires_at_ms <= self.issued_at_ms {
+        if let Some(expires_at_ms) = self.expires_at_ms
+            && expires_at_ms <= self.issued_at_ms
+        {
+            return Err(DidError::InvalidBindingProof(
+                "expires_at_ms must be greater than issued_at_ms".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl PaymentAccountBindingProof {
+    pub fn validate_basic(&self) -> Result<()> {
+        if self.payment_address.trim().is_empty() {
+            return Err(DidError::InvalidBindingProof(
+                "payment_address cannot be empty".into(),
+            ));
+        }
+        if self.rail.trim().is_empty() {
+            return Err(DidError::InvalidBindingProof("rail cannot be empty".into()));
+        }
+        if self
+            .network
+            .as_deref()
+            .is_some_and(|network| network.trim().is_empty())
+        {
+            return Err(DidError::InvalidBindingProof(
+                "network cannot be empty when present".into(),
+            ));
+        }
+        if self.receive_only && self.can_sign {
+            return Err(DidError::InvalidBindingProof(
+                "receive_only accounts cannot also can_sign".into(),
+            ));
+        }
+        match self.custody {
+            PaymentAccountCustody::WatchOnly => {
+                if !self.receive_only || self.can_sign {
+                    return Err(DidError::InvalidBindingProof(
+                        "watch_only accounts must be receive_only and cannot sign".into(),
+                    ));
+                }
+            }
+            PaymentAccountCustody::LocalGenerated
+            | PaymentAccountCustody::ImportedKey
+            | PaymentAccountCustody::ExternalSigner
+            | PaymentAccountCustody::Custom(_) => {
+                if !self.can_sign {
+                    return Err(DidError::InvalidBindingProof(
+                        "spending-capable custody must set can_sign".into(),
+                    ));
+                }
+                if self.payment_account_proof.is_none() {
+                    return Err(DidError::InvalidBindingProof(
+                        "spending-capable accounts require payment_account_proof".into(),
+                    ));
+                }
+            }
+        }
+        if self.agent_proof.value.trim().is_empty() {
+            return Err(DidError::InvalidBindingProof(
+                "agent_proof value cannot be empty".into(),
+            ));
+        }
+        if let Some(payment_account_proof) = &self.payment_account_proof {
+            if payment_account_proof.value.trim().is_empty() {
                 return Err(DidError::InvalidBindingProof(
-                    "expires_at_ms must be greater than issued_at_ms".into(),
+                    "payment_account_proof value cannot be empty".into(),
+                ));
+            }
+            if payment_account_proof
+                .challenge
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            {
+                return Err(DidError::InvalidBindingProof(
+                    "payment_account_proof challenge cannot be empty".into(),
                 ));
             }
         }
+        if let Some(expires_at_ms) = self.expires_at_ms
+            && expires_at_ms <= self.issued_at_ms
+        {
+            return Err(DidError::InvalidBindingProof(
+                "expires_at_ms must be greater than issued_at_ms".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
+impl VerifiedAgentContext {
+    pub fn validate_basic(&self) -> Result<()> {
+        if self.controller_node_id.trim().is_empty() {
+            return Err(DidError::InvalidBindingProof(
+                "controller_node_id cannot be empty".into(),
+            ));
+        }
+        if self
+            .source_node_id
+            .as_deref()
+            .is_some_and(|source_node_id| source_node_id.trim().is_empty())
+        {
+            return Err(DidError::InvalidBindingProof(
+                "source_node_id cannot be empty when present".into(),
+            ));
+        }
+        if self.source_node_verified {
+            let source_node_id = self.source_node_id.as_deref().ok_or_else(|| {
+                DidError::InvalidBindingProof("source_node_verified requires source_node_id".into())
+            })?;
+            if source_node_id != self.controller_node_id {
+                return Err(DidError::InvalidBindingProof(
+                    "source_node_id must match controller_node_id when source is verified".into(),
+                ));
+            }
+        }
+        if self.controller_binding_verified {
+            let proof = self.controller_binding_proof.as_ref().ok_or_else(|| {
+                DidError::InvalidBindingProof(
+                    "controller_binding_verified requires controller_binding_proof".into(),
+                )
+            })?;
+            proof.validate_basic()?;
+            if proof.agent_did != self.agent_did {
+                return Err(DidError::InvalidBindingProof(
+                    "controller binding agent_did does not match context agent_did".into(),
+                ));
+            }
+            if proof.node_peer_id.as_deref() != Some(self.controller_node_id.as_str()) {
+                return Err(DidError::InvalidBindingProof(
+                    "controller binding node_peer_id does not match controller_node_id".into(),
+                ));
+            }
+        }
+        if let Some(binding) = &self.payment_account_binding {
+            binding.validate_basic()?;
+            if binding.agent_did != self.agent_did {
+                return Err(DidError::InvalidBindingProof(
+                    "payment account binding agent_did does not match context agent_did".into(),
+                ));
+            }
+        }
+        if let Some(expires_at_ms) = self.expires_at_ms
+            && expires_at_ms <= self.verified_at_ms
+        {
+            return Err(DidError::InvalidBindingProof(
+                "expires_at_ms must be greater than verified_at_ms".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -323,6 +553,48 @@ where
             &delegation.issuer_did,
             &resolution.document,
         )
+    }
+}
+
+impl<C, P> VerifiedAgentContextVerifier for AgentPaymentContextVerifier<C, P>
+where
+    C: AgentNodeBindingVerifier,
+    P: PaymentAccountBindingVerifier,
+{
+    fn verify_verified_agent_context(&self, context: &VerifiedAgentContext) -> Result<()> {
+        context.validate_basic()?;
+        if !context.envelope_verified {
+            return Err(DidError::InvalidBindingProof(
+                "verified agent context requires envelope_verified".into(),
+            ));
+        }
+        if !context.source_node_verified {
+            return Err(DidError::InvalidBindingProof(
+                "verified agent context requires source_node_verified".into(),
+            ));
+        }
+        if !context.controller_binding_verified {
+            return Err(DidError::InvalidBindingProof(
+                "verified agent context requires controller_binding_verified".into(),
+            ));
+        }
+        let controller_binding = context.controller_binding_proof.as_ref().ok_or_else(|| {
+            DidError::InvalidBindingProof(
+                "verified agent context requires controller_binding_proof".into(),
+            )
+        })?;
+        self.controller_binding_verifier
+            .verify_agent_node_binding(controller_binding)?;
+
+        match context.payment_account_binding.as_ref() {
+            Some(payment_account_binding) => self
+                .payment_account_binding_verifier
+                .verify_payment_account_binding(payment_account_binding),
+            None if self.require_payment_account_binding => Err(DidError::InvalidBindingProof(
+                "verified agent payment context requires payment_account_binding".into(),
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -671,6 +943,24 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct AcceptControllerBindingVerifier;
+
+    impl AgentNodeBindingVerifier for AcceptControllerBindingVerifier {
+        fn verify_agent_node_binding(&self, proof: &AgentNodeBindingProof) -> Result<()> {
+            proof.validate_basic()
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct AcceptPaymentAccountBindingVerifier;
+
+    impl PaymentAccountBindingVerifier for AcceptPaymentAccountBindingVerifier {
+        fn verify_payment_account_binding(&self, proof: &PaymentAccountBindingProof) -> Result<()> {
+            proof.validate_basic()
+        }
+    }
+
     #[test]
     fn validates_basic_binding_proof() {
         let proof = AgentNodeBindingProof {
@@ -722,6 +1012,198 @@ mod tests {
 
         assert!(matches!(
             proof.validate_basic(),
+            Err(DidError::InvalidBindingProof(_))
+        ));
+    }
+
+    fn sample_proof(value: &str) -> ProofEnvelope {
+        ProofEnvelope {
+            algorithm: ProofAlgorithm::Jws,
+            value: value.into(),
+            verification_method: Some("#sig-1".into()),
+            challenge: None,
+            nonce: None,
+            created_at: None,
+            expires_at: None,
+        }
+    }
+
+    fn sample_payment_account_proof() -> PaymentAccountBindingProof {
+        PaymentAccountBindingProof {
+            agent_did: Did::parse("did:web:example.com:agents:alice").unwrap(),
+            payment_address: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".into(),
+            rail: "x402".into(),
+            network: Some("base-sepolia".into()),
+            custody: PaymentAccountCustody::ImportedKey,
+            receive_only: false,
+            can_sign: true,
+            capabilities: vec!["authorize_payment".into(), "submit_payment".into()],
+            issued_at_ms: 100,
+            expires_at_ms: Some(200),
+            nonce: Some("n-1".into()),
+            agent_proof: sample_proof("agent-sig"),
+            payment_account_proof: Some(ProofEnvelope {
+                challenge: Some("bind did:web:example.com:agents:alice to 0x742d".into()),
+                ..sample_proof("payment-account-sig")
+            }),
+        }
+    }
+
+    fn sample_verified_agent_context(
+        payment_account_binding: Option<PaymentAccountBindingProof>,
+    ) -> VerifiedAgentContext {
+        let agent_did = Did::parse("did:web:example.com:agents:alice").unwrap();
+        let controller_binding_proof = AgentNodeBindingProof {
+            agent_did: agent_did.clone(),
+            node_did: None,
+            node_peer_id: Some("12D3KooWExample".into()),
+            node_public_key_multibase: None,
+            wallet_did: None,
+            capabilities: vec!["invoke".into()],
+            issued_at_ms: 100,
+            expires_at_ms: Some(200),
+            nonce: None,
+            proof: sample_proof("controller-sig"),
+        };
+        VerifiedAgentContext {
+            agent_did,
+            controller_node_id: "12D3KooWExample".into(),
+            source_node_id: Some("12D3KooWExample".into()),
+            envelope_verified: true,
+            source_node_verified: true,
+            controller_binding_verified: true,
+            controller_binding_proof: Some(controller_binding_proof),
+            payment_account_binding,
+            verified_at_ms: 150,
+            expires_at_ms: Some(190),
+        }
+    }
+
+    #[test]
+    fn validates_payment_account_binding_for_spending_wallet() {
+        let proof = sample_payment_account_proof();
+
+        assert!(proof.validate_basic().is_ok());
+    }
+
+    #[test]
+    fn rejects_payment_account_binding_without_account_control_proof() {
+        let mut proof = sample_payment_account_proof();
+        proof.payment_account_proof = None;
+
+        assert!(matches!(
+            proof.validate_basic(),
+            Err(DidError::InvalidBindingProof(_))
+        ));
+    }
+
+    #[test]
+    fn validates_watch_only_payment_account_as_receive_only() {
+        let proof = PaymentAccountBindingProof {
+            agent_did: Did::parse("did:web:example.com:agents:alice").unwrap(),
+            payment_address: "0x122F8Fcaf2152420445Aa424E1D8C0306935B5c9".into(),
+            rail: "x402".into(),
+            network: Some("base-sepolia".into()),
+            custody: PaymentAccountCustody::WatchOnly,
+            receive_only: true,
+            can_sign: false,
+            capabilities: vec!["receive_payment".into()],
+            issued_at_ms: 100,
+            expires_at_ms: None,
+            nonce: None,
+            agent_proof: sample_proof("agent-sig"),
+            payment_account_proof: None,
+        };
+
+        assert!(proof.validate_basic().is_ok());
+    }
+
+    #[test]
+    fn rejects_watch_only_payment_account_that_can_sign() {
+        let mut proof = PaymentAccountBindingProof {
+            agent_did: Did::parse("did:web:example.com:agents:alice").unwrap(),
+            payment_address: "0x122F8Fcaf2152420445Aa424E1D8C0306935B5c9".into(),
+            rail: "x402".into(),
+            network: Some("base-sepolia".into()),
+            custody: PaymentAccountCustody::WatchOnly,
+            receive_only: true,
+            can_sign: true,
+            capabilities: vec!["receive_payment".into()],
+            issued_at_ms: 100,
+            expires_at_ms: None,
+            nonce: None,
+            agent_proof: sample_proof("agent-sig"),
+            payment_account_proof: None,
+        };
+
+        assert!(matches!(
+            proof.validate_basic(),
+            Err(DidError::InvalidBindingProof(_))
+        ));
+        proof.can_sign = false;
+        assert!(proof.validate_basic().is_ok());
+    }
+
+    #[test]
+    fn validates_verified_agent_context_with_controller_and_payment_binding() {
+        let context = sample_verified_agent_context(Some(sample_payment_account_proof()));
+
+        assert!(context.validate_basic().is_ok());
+    }
+
+    #[test]
+    fn verifies_agent_payment_context_chain() {
+        let context = sample_verified_agent_context(Some(sample_payment_account_proof()));
+        let verifier = AgentPaymentContextVerifier::new(
+            AcceptControllerBindingVerifier,
+            AcceptPaymentAccountBindingVerifier,
+        );
+
+        verifier.verify_verified_agent_context(&context).unwrap();
+    }
+
+    #[test]
+    fn rejects_agent_payment_context_without_required_payment_binding() {
+        let context = sample_verified_agent_context(None);
+        let verifier = AgentPaymentContextVerifier::new(
+            AcceptControllerBindingVerifier,
+            AcceptPaymentAccountBindingVerifier,
+        );
+
+        assert!(matches!(
+            verifier.verify_verified_agent_context(&context),
+            Err(DidError::InvalidBindingProof(_))
+        ));
+    }
+
+    #[test]
+    fn optionally_verifies_agent_context_without_payment_binding() {
+        let context = sample_verified_agent_context(None);
+        let verifier = AgentPaymentContextVerifier::with_optional_payment_binding(
+            AcceptControllerBindingVerifier,
+            AcceptPaymentAccountBindingVerifier,
+        );
+
+        verifier.verify_verified_agent_context(&context).unwrap();
+    }
+
+    #[test]
+    fn rejects_verified_agent_context_source_controller_mismatch() {
+        let context = VerifiedAgentContext {
+            agent_did: Did::parse("did:web:example.com:agents:alice").unwrap(),
+            controller_node_id: "12D3KooController".into(),
+            source_node_id: Some("12D3KooSource".into()),
+            envelope_verified: true,
+            source_node_verified: true,
+            controller_binding_verified: false,
+            controller_binding_proof: None,
+            payment_account_binding: None,
+            verified_at_ms: 150,
+            expires_at_ms: None,
+        };
+
+        assert!(matches!(
+            context.validate_basic(),
             Err(DidError::InvalidBindingProof(_))
         ));
     }

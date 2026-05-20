@@ -17,6 +17,7 @@ It is intentionally:
   - `did:web`
 - DID document types and validation
 - DID document builder and verification relationship helpers
+- agent identity context types for carrying verified agent state across projects
 - JWK public-key import/export helpers
 - `did:web` HTTP resolution
 - resolver cache and fallback composition helpers
@@ -25,6 +26,8 @@ It is intentionally:
   - `JWT`
   - compact `UCAN`-style envelopes
 - agent-to-node binding proof verification
+- payment account binding proof data model and validation
+- verified agent context validation
 - UCAN-style delegation validation
   - time window checks
   - parent-child attenuation checks
@@ -35,6 +38,7 @@ It is intentionally:
 
 - network transport
 - wallet private-key custody
+- payment transaction execution
 - service registry semantics
 - product-layer identity workflows
 - world semantics
@@ -59,6 +63,67 @@ wattetheria -> watt-did
 wattswarm -> watt-did
 wattswarm-servicenet -> watt-did
 ```
+
+## Agent Identity Model
+
+`watt-did` defines the shared identity vocabulary used by Watt agents. The main
+chain is:
+
+```text
+agent DID -> controller node -> optional payment account binding
+```
+
+The library keeps this model product-agnostic. It does not decide whether a
+payment is allowed, how much an agent can spend, or whether a human approval is
+needed. It only defines the verifiable identity and proof structures that other
+projects can attach to their own protocols.
+
+### Controller Binding
+
+`AgentNodeBindingProof` links an agent DID to the node that is allowed to speak
+for that agent.
+
+It carries:
+
+- `agent_did`
+- one or more node identifiers, such as `node_peer_id`, `node_did`, or
+  `node_public_key_multibase`
+- optional wallet DID
+- capability labels
+- issue and expiry timestamps
+- a proof envelope
+
+`VerifiedAgentContext` is the runtime context produced after an agent envelope
+and controller node have been checked. It records whether the envelope, source
+node, and controller binding were verified.
+
+### Payment Account Binding
+
+`PaymentAccountBindingProof` is an optional extension to the agent identity
+context. It links an agent DID to a payment account address for a settlement
+rail and network.
+
+It carries:
+
+- `agent_did`
+- `payment_address`
+- `rail`
+- optional `network`
+- custody mode, such as `watch_only`, `local_generated`, `imported_key`, or
+  `external_signer`
+- `receive_only` and `can_sign` flags
+- capability labels
+- an agent proof
+- an optional payment-account proof
+
+Spending-capable accounts must set `can_sign = true` and include a
+`payment_account_proof`. Watch-only accounts must be receive-only and cannot
+claim signing authority.
+
+`AgentPaymentContextVerifier` composes controller-node verification and payment
+account binding verification so callers can check an agent payment context as a
+single unit. Callers can require payment binding or allow it to be optional,
+depending on the protocol state they are validating.
 
 ## Library Usage
 

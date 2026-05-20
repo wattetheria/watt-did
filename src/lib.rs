@@ -15,9 +15,11 @@ pub use crate::error::{DidError, Result};
 pub use crate::jwk::{JsonWebKey, JwkPublicKey};
 pub use crate::methods::{DidKey, DidKeyPublicKey, DidWeb};
 pub use crate::proof::{
-    AgentNodeBindingProof, AgentNodeBindingVerifier, CompactJoseEdDsaVerifier,
-    JoseValidationOptions, ProofAlgorithm, ProofEnvelope, ResolverBackedUcanVerifier,
-    UcanCapability, UcanDelegation, UcanDelegationVerifier, UcanVerificationContext,
+    AgentNodeBindingProof, AgentNodeBindingVerifier, AgentPaymentContextVerifier,
+    CompactJoseEdDsaVerifier, JoseValidationOptions, PaymentAccountBindingProof,
+    PaymentAccountBindingVerifier, PaymentAccountCustody, ProofAlgorithm, ProofEnvelope,
+    ResolverBackedUcanVerifier, UcanCapability, UcanDelegation, UcanDelegationVerifier,
+    UcanVerificationContext, VerifiedAgentContext, VerifiedAgentContextVerifier,
 };
 pub use crate::resolver::{
     CachedDidResolver, DidResolutionCache, DidResolutionMetadata, DidResolutionResult, DidResolver,
