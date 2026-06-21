@@ -8,6 +8,8 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DidDocument {
     pub id: Did,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<AgentDocumentType>,
     #[serde(default)]
     pub also_known_as: Vec<String>,
     #[serde(default)]
@@ -26,6 +28,13 @@ pub struct DidDocument {
     pub capability_delegation: Vec<String>,
     #[serde(default)]
     pub service: Vec<Service>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentDocumentType {
+    NetworkAgent,
+    ServiceAgent,
+    OrganizationAgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +88,7 @@ impl DidDocument {
     pub fn new(id: Did) -> Self {
         Self {
             id,
+            agent_type: None,
             also_known_as: vec![],
             controller: vec![],
             verification_method: vec![],
@@ -153,6 +163,25 @@ impl DidDocument {
                     "service type cannot be empty".into(),
                 ));
             }
+            self.validate_wattetheria_service(service)?;
+        }
+
+        match self.agent_type {
+            Some(AgentDocumentType::NetworkAgent) => {
+                if !self.has_service_type(WATTETHERIA_NODE_ENDPOINT) {
+                    return Err(DidError::InvalidDocument(
+                        "NetworkAgent requires a WattetheriaNodeEndpoint service".into(),
+                    ));
+                }
+            }
+            Some(AgentDocumentType::ServiceAgent) => {
+                if !self.has_service_type(WATTETHERIA_SERVICE_ENDPOINT) {
+                    return Err(DidError::InvalidDocument(
+                        "ServiceAgent requires a WattetheriaServiceEndpoint service".into(),
+                    ));
+                }
+            }
+            Some(AgentDocumentType::OrganizationAgent) | None => {}
         }
 
         Ok(())
@@ -188,6 +217,104 @@ impl DidDocument {
         self.relationship_references(relationship)
             .iter()
             .any(|candidate| candidate == reference)
+    }
+
+    fn has_service_type(&self, expected: &str) -> bool {
+        self.service
+            .iter()
+            .any(|service| service.service_type.iter().any(|item| item == expected))
+    }
+
+    fn validate_wattetheria_service(&self, service: &Service) -> Result<()> {
+        if service
+            .service_type
+            .iter()
+            .any(|item| item == WATTETHERIA_NODE_ENDPOINT)
+        {
+            self.validate_wattetheria_node_endpoint(service)?;
+        }
+        if service
+            .service_type
+            .iter()
+            .any(|item| item == WATTETHERIA_SERVICE_ENDPOINT)
+        {
+            self.validate_wattetheria_service_endpoint(service)?;
+        }
+        Ok(())
+    }
+
+    fn validate_wattetheria_node_endpoint(&self, service: &Service) -> Result<()> {
+        let endpoint = endpoint_object(service, WATTETHERIA_NODE_ENDPOINT)?;
+        let network = required_endpoint_string(endpoint, "network")?;
+        let agent_did = required_endpoint_string(endpoint, "agentDid")?;
+        let address = required_endpoint_string(endpoint, "address")?;
+        let public_id = required_endpoint_string(endpoint, "publicId")?;
+        let transport = required_endpoint_string(endpoint, "transport")?;
+        if agent_did != self.id.to_string() {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaNodeEndpoint agentDid must match document id".into(),
+            ));
+        }
+        let expected_address = format!("wattetheria://{network}/identity/{agent_did}");
+        if address != expected_address {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaNodeEndpoint address must be wattetheria://<network>/identity/<agentDid>"
+                    .into(),
+            ));
+        }
+        if public_id.starts_with('@') {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaNodeEndpoint publicId must not include @".into(),
+            ));
+        }
+        if transport != "wattswarm" {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaNodeEndpoint transport must be wattswarm".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_wattetheria_service_endpoint(&self, service: &Service) -> Result<()> {
+        let endpoint = endpoint_object(service, WATTETHERIA_SERVICE_ENDPOINT)?;
+        let network = required_endpoint_string(endpoint, "network")?;
+        let agent_id = required_endpoint_string(endpoint, "agentId")?;
+        let service_address = required_endpoint_string(endpoint, "serviceAddress")?;
+        let provider_did = required_endpoint_string(endpoint, "providerDid")?;
+        let address = required_endpoint_string(endpoint, "address")?;
+        let transport = required_endpoint_string(endpoint, "transport")?;
+        Did::parse(provider_did).map_err(|_| {
+            DidError::InvalidDocument(
+                "WattetheriaServiceEndpoint providerDid must be a valid DID".into(),
+            )
+        })?;
+        let expected_address = format!("wattetheria://{network}/service/{agent_id}");
+        if address != expected_address {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaServiceEndpoint address must be wattetheria://<network>/service/<agentId>"
+                    .into(),
+            ));
+        }
+        if service_address.starts_with('@') {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaServiceEndpoint serviceAddress must not include @".into(),
+            ));
+        }
+        if !self
+            .also_known_as
+            .iter()
+            .any(|alias| alias == service_address)
+        {
+            return Err(DidError::InvalidDocument(
+                "ServiceAgent alsoKnownAs must include serviceAddress".into(),
+            ));
+        }
+        if transport != "servicenet" {
+            return Err(DidError::InvalidDocument(
+                "WattetheriaServiceEndpoint transport must be servicenet".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -274,6 +401,33 @@ fn validate_references(known_method_ids: &HashSet<String>, refs: &[String]) -> R
     Ok(())
 }
 
+const WATTETHERIA_NODE_ENDPOINT: &str = "WattetheriaNodeEndpoint";
+const WATTETHERIA_SERVICE_ENDPOINT: &str = "WattetheriaServiceEndpoint";
+
+fn endpoint_object<'a>(
+    service: &'a Service,
+    service_type: &str,
+) -> Result<&'a serde_json::Map<String, Value>> {
+    match &service.service_endpoint {
+        ServiceEndpoint::Json(Value::Object(object)) => Ok(object),
+        _ => Err(DidError::InvalidDocument(format!(
+            "{service_type} requires a JSON serviceEndpoint object"
+        ))),
+    }
+}
+
+fn required_endpoint_string<'a>(
+    endpoint: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<&'a str> {
+    endpoint
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| DidError::InvalidDocument(format!("serviceEndpoint.{field} is required")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +436,7 @@ mod tests {
     fn validates_document_with_local_fragment_reference() {
         let document = DidDocument {
             id: Did::parse("did:web:example.com").unwrap(),
+            agent_type: None,
             also_known_as: vec![],
             controller: vec![],
             verification_method: vec![VerificationMethod {
@@ -309,6 +464,7 @@ mod tests {
     fn rejects_unknown_fragment_reference() {
         let document = DidDocument {
             id: Did::parse("did:web:example.com").unwrap(),
+            agent_type: None,
             also_known_as: vec![],
             controller: vec![],
             verification_method: vec![],
@@ -350,5 +506,103 @@ mod tests {
                 .verification_method_by_reference("#sig-1")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn validates_wattetheria_network_agent_endpoint() {
+        let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
+        let document = DidDocument {
+            id: did.clone(),
+            agent_type: Some(AgentDocumentType::NetworkAgent),
+            also_known_as: vec![],
+            controller: vec![],
+            verification_method: vec![],
+            authentication: vec![],
+            assertion_method: vec![],
+            key_agreement: vec![],
+            capability_invocation: vec![],
+            capability_delegation: vec![],
+            service: vec![Service {
+                id: "#wattetheria-node".to_owned(),
+                service_type: vec![WATTETHERIA_NODE_ENDPOINT.to_owned()],
+                service_endpoint: ServiceEndpoint::Json(serde_json::json!({
+                    "network": "mainnet.watt-etheria",
+                    "address": format!("wattetheria://mainnet.watt-etheria/identity/{did}"),
+                    "agentDid": did.to_string(),
+                    "publicId": "agent-test.aa02a834d64b68b8",
+                    "transport": "wattswarm"
+                })),
+                description: None,
+            }],
+        };
+
+        assert!(document.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_wattetheria_service_agent_endpoint() {
+        let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
+        let document = DidDocument {
+            id: did.clone(),
+            agent_type: Some(AgentDocumentType::ServiceAgent),
+            also_known_as: vec!["dumpling@wattetheria".to_owned()],
+            controller: vec![did.to_string()],
+            verification_method: vec![],
+            authentication: vec![],
+            assertion_method: vec![],
+            key_agreement: vec![],
+            capability_invocation: vec![],
+            capability_delegation: vec![],
+            service: vec![Service {
+                id: "#wattetheria-servicenet".to_owned(),
+                service_type: vec![WATTETHERIA_SERVICE_ENDPOINT.to_owned()],
+                service_endpoint: ServiceEndpoint::Json(serde_json::json!({
+                    "network": "mainnet.watt-etheria",
+                    "address": "wattetheria://mainnet.watt-etheria/service/jingyuan-dumpling-7eb89abd",
+                    "agentId": "jingyuan-dumpling-7eb89abd",
+                    "serviceAddress": "dumpling@wattetheria",
+                    "providerDid": did.to_string(),
+                    "transport": "servicenet"
+                })),
+                description: None,
+            }],
+        };
+
+        assert!(document.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_service_agent_missing_alias() {
+        let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
+        let document = DidDocument {
+            id: did.clone(),
+            agent_type: Some(AgentDocumentType::ServiceAgent),
+            also_known_as: vec![],
+            controller: vec![],
+            verification_method: vec![],
+            authentication: vec![],
+            assertion_method: vec![],
+            key_agreement: vec![],
+            capability_invocation: vec![],
+            capability_delegation: vec![],
+            service: vec![Service {
+                id: "#wattetheria-servicenet".to_owned(),
+                service_type: vec![WATTETHERIA_SERVICE_ENDPOINT.to_owned()],
+                service_endpoint: ServiceEndpoint::Json(serde_json::json!({
+                    "network": "mainnet.watt-etheria",
+                    "address": "wattetheria://mainnet.watt-etheria/service/jingyuan-dumpling-7eb89abd",
+                    "agentId": "jingyuan-dumpling-7eb89abd",
+                    "serviceAddress": "dumpling@wattetheria",
+                    "providerDid": did.to_string(),
+                    "transport": "servicenet"
+                })),
+                description: None,
+            }],
+        };
+
+        assert!(matches!(
+            document.validate(),
+            Err(DidError::InvalidDocument(_))
+        ));
     }
 }

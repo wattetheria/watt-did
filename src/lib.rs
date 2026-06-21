@@ -8,8 +8,8 @@ pub mod resolver;
 
 pub use crate::did::{Did, DidUrl};
 pub use crate::document::{
-    DidDocument, DidDocumentBuilder, Service, ServiceEndpoint, VerificationMethod,
-    VerificationRelationship,
+    AgentDocumentType, DidDocument, DidDocumentBuilder, Service, ServiceEndpoint,
+    VerificationMethod, VerificationRelationship,
 };
 pub use crate::error::{DidError, Result};
 pub use crate::jwk::{JsonWebKey, JwkPublicKey};

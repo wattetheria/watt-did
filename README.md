@@ -57,6 +57,84 @@ For proof and resolver integrations, start with these exported types:
 - `AgentNodeBindingVerifier`, `PaymentAccountBindingVerifier`
 - `VerifiedAgentContextVerifier`, `AgentPaymentContextVerifier`
 
+## Wattetheria Agent Documents
+
+`DidDocument` can identify Wattetheria agent documents with the root `type`
+field. The supported values are:
+
+- `NetworkAgent`: an ordinary Wattetheria network agent that participates
+  through Wattswarm transport.
+- `ServiceAgent`: a ServiceNet-published service agent that callers reach
+  through ServiceNet.
+- `OrganizationAgent`: reserved for organization-scoped agents.
+
+### NetworkAgent
+
+A `NetworkAgent` document must include a `WattetheriaNodeEndpoint` service. Its
+canonical address is the DID-based Wattetheria identity address, and the human
+alias remains a separate public id.
+
+```json
+{
+  "id": "did:key:z6Mk...",
+  "type": "NetworkAgent",
+  "alsoKnownAs": ["@agent-public-id"],
+  "service": [{
+    "id": "#wattetheria-node",
+    "type": ["WattetheriaNodeEndpoint"],
+    "serviceEndpoint": {
+      "network": "mainnet.watt-etheria",
+      "address": "wattetheria://mainnet.watt-etheria/identity/did:key:z6Mk...",
+      "agentDid": "did:key:z6Mk...",
+      "publicId": "agent-public-id",
+      "transport": "wattswarm"
+    }
+  }]
+}
+```
+
+Validation enforces:
+
+- `agentDid` must match the document `id`.
+- `address` must equal `wattetheria://<network>/identity/<agentDid>`.
+- `publicId` must not include the leading `@`; the `@publicId` form is display
+  syntax only.
+- `transport` must be `wattswarm`.
+
+### ServiceAgent
+
+A `ServiceAgent` document must include a `WattetheriaServiceEndpoint` service.
+Its real deployment endpoint is not part of the public DID document; callers use
+ServiceNet as the transport boundary.
+
+```json
+{
+  "id": "did:key:zProvider...",
+  "type": "ServiceAgent",
+  "alsoKnownAs": ["xxxxxxxx@wattetheria"],
+  "service": [{
+    "id": "#wattetheria-servicenet",
+    "type": ["WattetheriaServiceEndpoint"],
+    "serviceEndpoint": {
+      "network": "mainnet.watt-etheria",
+      "address": "wattetheria://mainnet.watt-etheria/service/xxxxxxxx",
+      "agentId": "xxxxxxxxxx",
+      "serviceAddress": "xxxxxxx@wattetheria",
+      "providerDid": "did:key:zProvider...",
+      "transport": "servicenet"
+    }
+  }]
+}
+```
+
+Validation enforces:
+
+- `providerDid` must be a valid DID.
+- `address` must equal `wattetheria://<network>/service/<agentId>`.
+- `serviceAddress` must not start with `@`.
+- `alsoKnownAs` must include the same `serviceAddress`.
+- `transport` must be `servicenet`.
+
 ## CLI
 
 A small inspection binary is included:
