@@ -1228,8 +1228,9 @@ mod tests {
 
         let mut resolver = StaticDidResolver::new();
         resolver.insert(DidResolutionResult {
-            document,
             metadata: DidResolutionMetadata::default(),
+            document,
+            document_metadata: crate::resolver::DidDocumentMetadata::default(),
         });
 
         let verifier = ResolverBackedBindingVerifier::new(resolver, AcceptAllProofVerifier);
@@ -1322,8 +1323,9 @@ mod tests {
 
         let mut resolver = StaticDidResolver::new();
         resolver.insert(DidResolutionResult {
-            document,
             metadata: DidResolutionMetadata::default(),
+            document,
+            document_metadata: crate::resolver::DidDocumentMetadata::default(),
         });
 
         let verifier = ResolverBackedUcanVerifier::new(resolver, AcceptAllProofVerifier);

@@ -1,15 +1,16 @@
 use crate::error::{DidError, Result};
 use crate::methods::{parse_did_web_id, validate_did_key_id};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use ssi_dids_core::{DIDBuf as SsiDidBuf, DIDURLBuf as SsiDidUrlBuf};
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Did {
     method: String,
     id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DidUrl {
     did: Did,
     path: Option<String>,
@@ -19,31 +20,10 @@ pub struct DidUrl {
 
 impl Did {
     pub fn parse(input: &str) -> Result<Self> {
-        if !input.starts_with("did:") {
-            return Err(DidError::InvalidDidSyntax(
-                "did must start with 'did:'".into(),
-            ));
-        }
-        if input.contains('/') || input.contains('?') || input.contains('#') {
-            return Err(DidError::InvalidDidSyntax(
-                "base did cannot include path, query, or fragment; parse as DidUrl instead".into(),
-            ));
-        }
-
-        let mut parts = input.splitn(3, ':');
-        let _prefix = parts.next();
-        let method = parts
-            .next()
-            .ok_or_else(|| DidError::InvalidDidSyntax("missing did method".into()))?
-            .trim()
-            .to_lowercase();
-        let id = parts
-            .next()
-            .ok_or_else(|| DidError::InvalidDidSyntax("missing method-specific-id".into()))?
-            .trim()
-            .to_owned();
-
-        validate_method(&method)?;
+        let parsed = SsiDidBuf::from_string(input.to_owned())
+            .map_err(|error| DidError::InvalidDidSyntax(error.to_string()))?;
+        let method = parsed.method_name().to_owned();
+        let id = parsed.method_specific_id().to_owned();
         validate_method_specific_id(&method, &id)?;
 
         Ok(Self { method, id })
@@ -62,6 +42,35 @@ impl Did {
     }
 }
 
+impl Serialize for Did {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Did {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            String(String),
+            Legacy { method: String, id: String },
+        }
+
+        let value = match Representation::deserialize(deserializer)? {
+            Representation::String(value) => value,
+            Representation::Legacy { method, id } => format!("did:{method}:{id}"),
+        };
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl Display for Did {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "did:{}:{}", self.method, self.id)
@@ -70,43 +79,12 @@ impl Display for Did {
 
 impl DidUrl {
     pub fn parse(input: &str) -> Result<Self> {
-        let path_start = input.find('/');
-        let query_start = input.find('?');
-        let fragment_start = input.find('#');
-        let did_end = [path_start, query_start, fragment_start]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(input.len());
-        let did = Did::parse(&input[..did_end])?;
-
-        let mut path = None;
-        let mut query = None;
-        let mut fragment = None;
-        let remainder = &input[did_end..];
-
-        if !remainder.is_empty() {
-            let query_index = remainder.find('?');
-            let fragment_index = remainder.find('#');
-
-            if remainder.starts_with('/') {
-                let path_end = [query_index, fragment_index]
-                    .into_iter()
-                    .flatten()
-                    .min()
-                    .unwrap_or(remainder.len());
-                path = Some(remainder[..path_end].to_owned());
-            }
-
-            if let Some(index) = query_index {
-                let query_end = fragment_index.unwrap_or(remainder.len());
-                query = Some(remainder[index + 1..query_end].to_owned());
-            }
-
-            if let Some(index) = fragment_index {
-                fragment = Some(remainder[index + 1..].to_owned());
-            }
-        }
+        let parsed = SsiDidUrlBuf::from_string(input.to_owned())
+            .map_err(|error| DidError::InvalidDidUrl(error.to_string()))?;
+        let did = Did::parse(parsed.did().as_str())?;
+        let path = (!parsed.path().is_empty()).then(|| parsed.path().as_str().to_owned());
+        let query = parsed.query().map(|value| value.as_str().to_owned());
+        let fragment = parsed.fragment().map(|value| value.as_str().to_owned());
 
         Ok(Self {
             did,
@@ -137,6 +115,59 @@ impl DidUrl {
     }
 }
 
+impl Serialize for DidUrl {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DidUrl {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            String(String),
+            Legacy {
+                did: Did,
+                path: Option<String>,
+                query: Option<String>,
+                fragment: Option<String>,
+            },
+        }
+
+        let value = match Representation::deserialize(deserializer)? {
+            Representation::String(value) => value,
+            Representation::Legacy {
+                did,
+                path,
+                query,
+                fragment,
+            } => {
+                let mut value = did.to_string();
+                if let Some(path) = path {
+                    value.push_str(&path);
+                }
+                if let Some(query) = query {
+                    value.push('?');
+                    value.push_str(&query);
+                }
+                if let Some(fragment) = fragment {
+                    value.push('#');
+                    value.push_str(&fragment);
+                }
+                value
+            }
+        };
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl Display for DidUrl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.did)?;
@@ -151,21 +182,6 @@ impl Display for DidUrl {
         }
         Ok(())
     }
-}
-
-fn validate_method(method: &str) -> Result<()> {
-    if method.is_empty() {
-        return Err(DidError::InvalidMethod("method cannot be empty".into()));
-    }
-    if !method
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
-    {
-        return Err(DidError::InvalidMethod(
-            "method must use lowercase ascii letters and digits only".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_method_specific_id(method: &str, id: &str) -> Result<()> {
@@ -193,6 +209,10 @@ mod tests {
     fn parses_key_did() {
         let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
         assert_eq!(did.method(), "key");
+        assert_eq!(
+            serde_json::to_string(&did).unwrap(),
+            "\"did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S\""
+        );
     }
 
     #[test]
@@ -208,5 +228,38 @@ mod tests {
         assert_eq!(did_url.path(), Some("/path"));
         assert_eq!(did_url.query(), Some("view=1"));
         assert_eq!(did_url.fragment(), Some("key-1"));
+        assert_eq!(
+            serde_json::to_string(&did_url).unwrap(),
+            "\"did:web:example.com:users:alice/path?view=1#key-1\""
+        );
+    }
+
+    #[test]
+    fn rejects_non_w3c_did_syntax() {
+        assert!(Did::parse("did:WEB:example.com").is_err());
+        assert!(Did::parse("did:web:example.com ").is_err());
+        assert!(DidUrl::parse("did:web:example.com#bad%").is_err());
+    }
+
+    #[test]
+    fn reads_legacy_object_representations() {
+        let did: Did = serde_json::from_value(serde_json::json!({
+            "method": "web",
+            "id": "example.com"
+        }))
+        .unwrap();
+        assert_eq!(did.to_string(), "did:web:example.com");
+
+        let did_url: DidUrl = serde_json::from_value(serde_json::json!({
+            "did": {"method": "web", "id": "example.com"},
+            "path": "/users/alice",
+            "query": "view=1",
+            "fragment": "key-1"
+        }))
+        .unwrap();
+        assert_eq!(
+            did_url.to_string(),
+            "did:web:example.com/users/alice?view=1#key-1"
+        );
     }
 }

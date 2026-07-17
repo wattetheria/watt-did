@@ -6,24 +6,55 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DidResolutionMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "content_type",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub content_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "source_url", skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "retrieved_at_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub retrieved_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DidDocumentMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deactivated: Option<bool>,
+    #[serde(default, alias = "version_id", skip_serializing_if = "Option::is_none")]
     pub version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equivalent_id: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DidResolutionResult {
-    pub document: DidDocument,
-    #[serde(default)]
+    #[serde(rename = "didResolutionMetadata", alias = "metadata", default)]
     pub metadata: DidResolutionMetadata,
+    #[serde(rename = "didDocument", alias = "document")]
+    pub document: DidDocument,
+    #[serde(rename = "didDocumentMetadata", default)]
+    pub document_metadata: DidDocumentMetadata,
 }
 
 pub trait DidResolver {
@@ -265,9 +296,7 @@ where
         let url = did_web.to_url();
         if self.options.require_tls_except_loopback
             && url.starts_with("http://")
-            && !(did_web.host.starts_with("localhost")
-                || did_web.host.starts_with("127.0.0.1")
-                || did_web.host.starts_with("[::1]"))
+            && !crate::methods::is_loopback_host(&did_web.host)
         {
             return Err(DidError::InvalidDidWeb(
                 "did:web resolver refuses insecure http for non-loopback hosts".into(),
@@ -292,7 +321,6 @@ where
         }
         document.validate()?;
         Ok(DidResolutionResult {
-            document,
             metadata: DidResolutionMetadata {
                 content_type: fetched
                     .content_type
@@ -300,8 +328,9 @@ where
                 source_url: Some(url),
                 etag: fetched.etag,
                 retrieved_at_ms: None,
-                version_id: None,
             },
+            document,
+            document_metadata: DidDocumentMetadata::default(),
         })
     }
 }
@@ -317,14 +346,14 @@ mod tests {
         let document = DidDocument::new(did.clone());
         let mut resolver = StaticDidResolver::new();
         resolver.insert(DidResolutionResult {
-            document,
             metadata: DidResolutionMetadata {
                 content_type: Some("application/did+json".into()),
                 source_url: None,
                 etag: None,
                 retrieved_at_ms: Some(123),
-                version_id: None,
             },
+            document,
+            document_metadata: DidDocumentMetadata::default(),
         });
 
         let resolved = resolver.resolve(&did).unwrap();
@@ -394,12 +423,39 @@ mod tests {
         let primary = StaticDidResolver::new();
         let mut secondary = StaticDidResolver::new();
         secondary.insert(DidResolutionResult {
-            document,
             metadata: DidResolutionMetadata::default(),
+            document,
+            document_metadata: DidDocumentMetadata::default(),
         });
 
         let resolver = FallbackDidResolver::new(primary, secondary);
         let resolved = resolver.resolve(&did).unwrap();
         assert_eq!(resolved.document.id, did);
+    }
+
+    #[test]
+    fn serializes_standard_did_resolution_result_shape() {
+        let did = Did::parse("did:web:example.com").unwrap();
+        let result = DidResolutionResult {
+            metadata: DidResolutionMetadata {
+                content_type: Some("application/did+json".into()),
+                ..Default::default()
+            },
+            document: DidDocument::new(did),
+            document_metadata: DidDocumentMetadata {
+                version_id: Some("1".into()),
+                ..Default::default()
+            },
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            value["didResolutionMetadata"]["contentType"],
+            "application/did+json"
+        );
+        assert_eq!(value["didDocument"]["id"], "did:web:example.com");
+        assert_eq!(value["didDocumentMetadata"]["versionId"], "1");
+        assert!(value.get("document").is_none());
+        assert!(value.get("metadata").is_none());
     }
 }

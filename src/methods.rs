@@ -2,7 +2,15 @@ use crate::did::Did;
 use crate::document::{DidDocument, VerificationMethod};
 use crate::error::{DidError, Result};
 use crate::jwk::{JsonWebKey, JwkPublicKey};
+use did_method_key::DIDKey as SsiDidKey;
+use did_web::DIDWeb as SsiDidWeb;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use ssi_dids_core::{
+    DIDMethod,
+    document::representation::MediaType,
+    resolution::{DIDMethodResolver, Options as SsiResolutionOptions},
+};
+use std::net::IpAddr;
 
 const DID_KEY_BASE58BTC: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const ED25519_PUBLIC_KEY_MULTICODEC_PREFIX: [u8; 2] = [0xed, 0x01];
@@ -102,9 +110,26 @@ fn encode_did_web_segment(value: &str) -> String {
     utf8_percent_encode(value, DID_WEB_ENCODE_SET).to_string()
 }
 
+pub(crate) fn is_loopback_host(authority: &str) -> bool {
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split_once(']').map(|(host, _)| host)
+    } else {
+        authority
+            .rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|ch| ch.is_ascii_digit()))
+            .map(|(host, _)| host)
+    }
+    .unwrap_or(authority);
+
+    host == "localhost"
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 impl DidKey {
     pub fn from_did(did: Did) -> Result<Self> {
-        if did.method() != "key" {
+        if did.method() != SsiDidKey::DID_METHOD_NAME {
             return Err(DidError::UnsupportedMethod(did.method().to_owned()));
         }
         validate_did_key_id(did.id())?;
@@ -133,13 +158,26 @@ impl DidKey {
     }
 
     pub fn to_document(&self) -> Result<DidDocument> {
-        let verification_method = self.verification_method("key-1")?;
-        let mut document = DidDocument::new(self.did.clone());
-        document.verification_method.push(verification_method);
-        document.authentication.push("#key-1".into());
-        document.assertion_method.push("#key-1".into());
-        document.capability_invocation.push("#key-1".into());
-        document.capability_delegation.push("#key-1".into());
+        let output = pollster::block_on(SsiDidKey.resolve_method_representation(
+            self.did.id(),
+            SsiResolutionOptions {
+                accept: Some(MediaType::Json),
+                ..Default::default()
+            },
+        ))
+        .map_err(|error| DidError::InvalidDidKey(error.to_string()))?;
+        let mut document: DidDocument =
+            serde_json::from_slice(&output.document).map_err(|error| {
+                DidError::InvalidDocument(format!(
+                    "did-method-key returned an invalid DID document: {error}"
+                ))
+            })?;
+        let verification_method = format!("{}#{}", self.did, self.public_key_multibase);
+        document
+            .capability_invocation
+            .push(verification_method.clone());
+        document.capability_delegation.push(verification_method);
+        document.validate()?;
         Ok(document)
     }
 
@@ -188,7 +226,7 @@ impl DidKey {
 
 impl DidWeb {
     pub fn from_did(did: Did) -> Result<Self> {
-        if did.method() != "web" {
+        if did.method() != SsiDidWeb::DID_METHOD_NAME {
             return Err(DidError::UnsupportedMethod(did.method().to_owned()));
         }
         let (host, path_segments) = parse_did_web_id(did.id())?;
@@ -220,7 +258,11 @@ impl DidWeb {
                 .iter()
                 .map(|segment| encode_did_web_segment(segment)),
         );
-        let did = Did::parse(&format!("did:web:{}", id_parts.join(":")))?;
+        let did = Did::parse(&format!(
+            "did:{}:{}",
+            SsiDidWeb::DID_METHOD_NAME,
+            id_parts.join(":")
+        ))?;
         Ok(Self {
             did,
             host,
@@ -229,10 +271,7 @@ impl DidWeb {
     }
 
     pub fn to_url(&self) -> String {
-        let scheme = if self.host.starts_with("localhost")
-            || self.host.starts_with("127.0.0.1")
-            || self.host.starts_with("[::1]")
-        {
+        let scheme = if is_loopback_host(&self.host) {
             "http"
         } else {
             "https"
@@ -241,11 +280,13 @@ impl DidWeb {
         if self.path_segments.is_empty() {
             format!("{scheme}://{}/.well-known/did.json", self.host)
         } else {
-            format!(
-                "{scheme}://{}/{}/did.json",
-                self.host,
-                self.path_segments.join("/")
-            )
+            let path = self
+                .path_segments
+                .iter()
+                .map(|segment| encode_did_web_segment(segment))
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("{scheme}://{}/{}/did.json", self.host, path)
         }
     }
 }
@@ -278,18 +319,51 @@ mod tests {
     }
 
     #[test]
+    fn localhost_prefix_domain_still_requires_https() {
+        let web = DidWeb::from_parts("localhost.example.com", &[] as &[&str]).unwrap();
+        assert_eq!(
+            web.to_url(),
+            "https://localhost.example.com/.well-known/did.json"
+        );
+    }
+
+    #[test]
     fn did_key_can_build_minimal_document() {
         let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
         let did_key = DidKey::from_did(did).unwrap();
         let document = did_key.to_document().unwrap();
-        assert_eq!(document.authentication, vec!["#key-1"]);
+        let expected_method = "did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S#z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S";
+        assert_eq!(document.authentication, vec![expected_method]);
+        assert_eq!(document.assertion_method, vec![expected_method]);
+        assert_eq!(document.capability_invocation, vec![expected_method]);
+        assert_eq!(document.capability_delegation, vec![expected_method]);
         assert_eq!(document.verification_method.len(), 1);
+        assert_eq!(document.verification_method[0].id, expected_method);
         assert_eq!(
             document.verification_method[0]
                 .public_key_multibase
                 .as_deref(),
             Some("z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S")
         );
+    }
+
+    #[test]
+    fn did_key_document_uses_w3c_json_names() {
+        let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S").unwrap();
+        let document = DidKey::from_did(did).unwrap().to_document().unwrap();
+        let value = serde_json::to_value(document).unwrap();
+
+        assert!(value["id"].is_string());
+        assert!(value.get("verificationMethod").is_some());
+        assert!(value.get("capabilityInvocation").is_some());
+        assert!(value.get("verification_method").is_none());
+    }
+
+    #[test]
+    fn did_web_url_keeps_encoded_path_boundaries() {
+        let did = Did::parse("did:web:example.com:users%2Falice").unwrap();
+        let web = DidWeb::from_did(did).unwrap();
+        assert_eq!(web.to_url(), "https://example.com/users%2Falice/did.json");
     }
 
     #[test]

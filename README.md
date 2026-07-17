@@ -7,11 +7,19 @@ documents, and proof verification. Product workflows, wallet custody, network
 transport, payments, and registry semantics live in the higher-level Watt
 projects that use this crate.
 
+The crate implements a W3C DID Core-compatible data model and resolution result
+shape. It is not a W3C-certified implementation, and `did:key` and `did:web`
+are community DID methods rather than W3C Recommendations. Neither method
+requires a blockchain in this implementation.
+
 ## What It Provides
 
-- DID parsing for `did:key` and `did:web`
+- W3C DID and DID URL syntax parsing through `ssi-dids-core`
+- `did:key` document generation through `did-method-key`
 - DID document types, builders, validation, and relationship helpers
-- `did:web` resolution, resolver caching, and resolver fallback composition
+- `did:web` method integration, resolution, caching, and fallback composition
+- Standard `didResolutionMetadata`, `didDocument`, and
+  `didDocumentMetadata` resolution output
 - JWK public-key import/export helpers
 - Compact JOSE EdDSA verification for JWS/JWT-style proof envelopes
 - UCAN-style delegation validation
@@ -45,9 +53,16 @@ use watt_did::{Did, DidKey};
 let did = Did::parse("did:key:z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S")?;
 let document = DidKey::from_did(did)?.to_document()?;
 
-assert_eq!(document.authentication, vec!["#key-1"]);
+assert!(document.authentication[0].ends_with(
+    "#z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S"
+));
 # Ok::<(), watt_did::DidError>(())
 ```
+
+Serialized identifiers are strings, DID document properties use W3C camelCase,
+and `did:key` verification method fragments use the multibase key fingerprint.
+Legacy Watt object identifiers and snake_case DID documents remain readable
+during migration, but all newly serialized output uses the standard shape.
 
 For proof and resolver integrations, start with these exported types:
 

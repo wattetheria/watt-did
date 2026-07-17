@@ -22,7 +22,7 @@ pub use crate::proof::{
     UcanVerificationContext, VerifiedAgentContext, VerifiedAgentContextVerifier,
 };
 pub use crate::resolver::{
-    CachedDidResolver, DidResolutionCache, DidResolutionMetadata, DidResolutionResult, DidResolver,
-    DidWebResolver, DidWebResolverOptions, FallbackDidResolver, InMemoryDidResolutionCache,
-    StaticDidDocumentFetcher, StaticDidResolver,
+    CachedDidResolver, DidDocumentMetadata, DidResolutionCache, DidResolutionMetadata,
+    DidResolutionResult, DidResolver, DidWebResolver, DidWebResolverOptions, FallbackDidResolver,
+    InMemoryDidResolutionCache, StaticDidDocumentFetcher, StaticDidResolver,
 };

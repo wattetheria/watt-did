@@ -1,32 +1,61 @@
 use crate::did::{Did, DidUrl};
 use crate::error::{DidError, Result};
 use crate::jwk::JsonWebKey;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DidDocument {
     pub id: Did,
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<AgentDocumentType>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "also_known_as",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub also_known_as: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_one_or_many"
+    )]
     pub controller: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "verification_method",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub verification_method: Vec<VerificationMethod>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authentication: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "assertion_method",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub assertion_method: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "key_agreement",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub key_agreement: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "capability_invocation",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub capability_invocation: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "capability_delegation",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub capability_delegation: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service: Vec<Service>,
 }
 
@@ -38,24 +67,39 @@ pub enum AgentDocumentType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerificationMethod {
     pub id: String,
     #[serde(rename = "type")]
     pub method_type: String,
     pub controller: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "public_key_multibase",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub public_key_multibase: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "public_key_jwk",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub public_key_jwk: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "blockchain_account_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub blockchain_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Service {
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", deserialize_with = "deserialize_one_or_many")]
     pub service_type: Vec<String>,
+    #[serde(alias = "service_endpoint")]
     pub service_endpoint: ServiceEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -428,6 +472,23 @@ fn required_endpoint_string<'a>(
         .ok_or_else(|| DidError::InvalidDocument(format!("serviceEndpoint.{field} is required")))
 }
 
+fn deserialize_one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => vec![value],
+        OneOrMany::Many(values) => values,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,5 +665,85 @@ mod tests {
             document.validate(),
             Err(DidError::InvalidDocument(_))
         ));
+    }
+
+    #[test]
+    fn serializes_w3c_did_document_property_names() {
+        let did = Did::parse("did:web:example.com").unwrap();
+        let document = DidDocument::builder(did.clone())
+            .controller(did.to_string())
+            .verification_method(VerificationMethod {
+                id: format!("{did}#key-1"),
+                method_type: "Multikey".into(),
+                controller: did.to_string(),
+                public_key_multibase: Some(
+                    "z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S".into(),
+                ),
+                public_key_jwk: None,
+                blockchain_account_id: None,
+            })
+            .relationship(
+                VerificationRelationship::Authentication,
+                format!("{did}#key-1"),
+            )
+            .service(Service {
+                id: format!("{did}#messages"),
+                service_type: vec!["Messaging".into()],
+                service_endpoint: ServiceEndpoint::One("https://example.com/messages".into()),
+                description: None,
+            })
+            .build()
+            .unwrap();
+
+        let value = serde_json::to_value(document).unwrap();
+        assert_eq!(value["id"], "did:web:example.com");
+        assert!(value.get("verificationMethod").is_some());
+        assert!(value.get("verification_method").is_none());
+        assert!(value.get("assertionMethod").is_none());
+        assert_eq!(
+            value["verificationMethod"][0]["publicKeyMultibase"],
+            "z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S"
+        );
+        assert_eq!(
+            value["service"][0]["serviceEndpoint"],
+            "https://example.com/messages"
+        );
+    }
+
+    #[test]
+    fn deserializes_w3c_one_or_many_properties() {
+        let document: DidDocument = serde_json::from_value(serde_json::json!({
+            "id": "did:web:example.com",
+            "controller": "did:web:controller.example",
+            "service": [{
+                "id": "did:web:example.com#messages",
+                "type": "Messaging",
+                "serviceEndpoint": "https://example.com/messages"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(document.controller, vec!["did:web:controller.example"]);
+        assert_eq!(document.service[0].service_type, vec!["Messaging"]);
+    }
+
+    #[test]
+    fn reads_legacy_snake_case_document_properties() {
+        let document: DidDocument = serde_json::from_value(serde_json::json!({
+            "id": {"method": "web", "id": "example.com"},
+            "verification_method": [{
+                "id": "#key-1",
+                "type": "Multikey",
+                "controller": "did:web:example.com",
+                "public_key_multibase":
+                    "z6MkvQ4QZz7T1cA7GJYk7oPK5vVsQt1zAr72Xd23LgzX776S"
+            }],
+            "assertion_method": ["#key-1"]
+        }))
+        .unwrap();
+
+        assert_eq!(document.id.to_string(), "did:web:example.com");
+        assert_eq!(document.assertion_method, vec!["#key-1"]);
+        assert_eq!(document.verification_method.len(), 1);
     }
 }
