@@ -128,6 +128,16 @@ pub(crate) fn is_loopback_host(authority: &str) -> bool {
 }
 
 impl DidKey {
+    pub fn from_ed25519_public_key(public_key: [u8; 32]) -> Result<Self> {
+        let mut multicodec =
+            Vec::with_capacity(ED25519_PUBLIC_KEY_MULTICODEC_PREFIX.len() + public_key.len());
+        multicodec.extend_from_slice(&ED25519_PUBLIC_KEY_MULTICODEC_PREFIX);
+        multicodec.extend_from_slice(&public_key);
+        let public_key_multibase = format!("z{}", bs58::encode(multicodec).into_string());
+        let did = Did::parse(&format!("did:key:{public_key_multibase}"))?;
+        Self::from_did(did)
+    }
+
     pub fn from_did(did: Did) -> Result<Self> {
         if did.method() != SsiDidKey::DID_METHOD_NAME {
             return Err(DidError::UnsupportedMethod(did.method().to_owned()));
@@ -376,6 +386,20 @@ mod tests {
         assert_eq!(
             did_key.decode_public_key().unwrap(),
             DidKeyPublicKey::Ed25519([7u8; 32])
+        );
+    }
+
+    #[test]
+    fn did_key_builds_from_ed25519_public_key() {
+        let did_key = DidKey::from_ed25519_public_key([7u8; 32]).unwrap();
+
+        assert_eq!(
+            did_key.decode_public_key().unwrap(),
+            DidKeyPublicKey::Ed25519([7u8; 32])
+        );
+        assert_eq!(
+            did_key.did.to_string(),
+            format!("did:key:{}", did_key.public_key_multibase)
         );
     }
 

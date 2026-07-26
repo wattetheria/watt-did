@@ -173,11 +173,11 @@ impl DidDocument {
                 )));
             }
             if method.id.starts_with('#') {
-                known_method_ids.insert(method.id.clone());
+                known_method_ids.insert(self.absolute_verification_reference(&method.id));
             } else {
                 DidUrl::parse(&method.id)
                     .map_err(|_| DidError::InvalidVerificationMethodReference(method.id.clone()))?;
-                known_method_ids.insert(method.id.clone());
+                known_method_ids.insert(self.absolute_verification_reference(&method.id));
             }
         }
 
@@ -188,7 +188,11 @@ impl DidDocument {
             &self.capability_invocation,
             &self.capability_delegation,
         ] {
-            validate_references(&known_method_ids, refs)?;
+            let references = refs
+                .iter()
+                .map(|reference| self.absolute_verification_reference(reference))
+                .collect::<Vec<_>>();
+            validate_references(&known_method_ids, &references)?;
         }
 
         for service in &self.service {
@@ -238,9 +242,10 @@ impl DidDocument {
     }
 
     pub fn verification_method_by_reference(&self, reference: &str) -> Option<&VerificationMethod> {
-        self.verification_method.iter().find(|method| {
-            method.id == reference || format!("{}{}", self.id, method.id) == reference
-        })
+        let reference = self.absolute_verification_reference(reference);
+        self.verification_method
+            .iter()
+            .find(|method| self.absolute_verification_reference(&method.id) == reference)
     }
 
     pub fn relationship_references(&self, relationship: VerificationRelationship) -> &[String] {
@@ -260,7 +265,18 @@ impl DidDocument {
     ) -> bool {
         self.relationship_references(relationship)
             .iter()
-            .any(|candidate| candidate == reference)
+            .any(|candidate| {
+                self.absolute_verification_reference(candidate)
+                    == self.absolute_verification_reference(reference)
+            })
+    }
+
+    fn absolute_verification_reference(&self, reference: &str) -> String {
+        if reference.starts_with('#') {
+            format!("{}{reference}", self.id)
+        } else {
+            reference.to_owned()
+        }
     }
 
     fn has_service_type(&self, expected: &str) -> bool {
@@ -431,15 +447,12 @@ impl VerificationMethod {
 
 fn validate_references(known_method_ids: &HashSet<String>, refs: &[String]) -> Result<()> {
     for reference in refs {
-        if reference.starts_with('#') {
-            if !known_method_ids.contains(reference) {
-                return Err(DidError::InvalidVerificationMethodReference(
-                    reference.clone(),
-                ));
-            }
-        } else {
-            DidUrl::parse(reference)
-                .map_err(|_| DidError::InvalidVerificationMethodReference(reference.clone()))?;
+        DidUrl::parse(reference)
+            .map_err(|_| DidError::InvalidVerificationMethodReference(reference.clone()))?;
+        if !known_method_ids.contains(reference) {
+            return Err(DidError::InvalidVerificationMethodReference(
+                reference.clone(),
+            ));
         }
     }
     Ok(())

@@ -15,9 +15,14 @@ requires a blockchain in this implementation.
 ## What It Provides
 
 - W3C DID and DID URL syntax parsing through `ssi-dids-core`
-- `did:key` document generation through `did-method-key`
+- `did:key` construction from Ed25519 public keys and document generation
+  through `did-method-key`
 - DID document types, builders, validation, and relationship helpers
-- `did:web` method integration, resolution, caching, and fallback composition
+- method-routed `DidResolverRegistry` with built-in `did:key` and `did:web`
+  resolvers and registration points for regional DID methods
+- `did:web` method integration, bounded network resolution, expiring caching,
+  and fallback composition
+- verification-method lookup with optional DID relationship enforcement
 - Standard `didResolutionMetadata`, `didDocument`, and
   `didDocumentMetadata` resolution output
 - JWK public-key import/export helpers
@@ -66,11 +71,18 @@ during migration, but all newly serialized output uses the standard shape.
 
 For proof and resolver integrations, start with these exported types:
 
-- `DidResolver`, `DidWebResolver`, `CachedDidResolver`, `FallbackDidResolver`
+- `DidResolver`, `DidResolverRegistry`, `DidKeyResolver`, `DidWebResolver`
+- `CachedDidResolver`, `FallbackDidResolver`
 - `CompactJoseEdDsaVerifier`, `JoseValidationOptions`, `ProofEnvelope`
 - `UcanDelegationVerifier`, `ResolverBackedUcanVerifier`
 - `AgentNodeBindingVerifier`, `PaymentAccountBindingVerifier`
 - `VerifiedAgentContextVerifier`, `AgentPaymentContextVerifier`
+
+The default `did:web` fetcher uses connection and request timeouts, refuses
+redirects and private/local/reserved targets, limits response bodies, and
+rejects deactivated DID results before selecting verification material.
+`InMemoryDidResolutionCache` expires entries after five minutes by default;
+call `with_ttl` when a deployment needs a different freshness policy.
 
 ## Wattetheria Agent Documents
 

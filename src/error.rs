@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::document::VerificationRelationship;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DidError {
     #[error("invalid did syntax: {0}")]
@@ -8,6 +10,8 @@ pub enum DidError {
     InvalidDidUrl(String),
     #[error("unsupported did method: {0}")]
     UnsupportedMethod(String),
+    #[error("resolver already registered for did method: {0}")]
+    ResolverAlreadyRegistered(String),
     #[error("invalid did method: {0}")]
     InvalidMethod(String),
     #[error("invalid method-specific identifier: {0}")]
@@ -24,6 +28,15 @@ pub enum DidError {
     InvalidJwk(String),
     #[error("invalid verification method reference: {0}")]
     InvalidVerificationMethodReference(String),
+    #[error("DID is deactivated: {0}")]
+    DeactivatedDid(String),
+    #[error(
+        "verification method '{reference}' is not authorized for relationship {relationship:?}"
+    )]
+    VerificationRelationshipMismatch {
+        reference: String,
+        relationship: VerificationRelationship,
+    },
     #[error("invalid binding proof: {0}")]
     InvalidBindingProof(String),
     #[error("verification failed: {0}")]
